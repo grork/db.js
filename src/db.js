@@ -1,363 +1,299 @@
-(function ( window ) {
+﻿(function (window) {
     'use strict';
-    var indexedDB = window.indexedDB || window.webkitIndexedDB || window.mozIndexedDB || window.oIndexedDB || window.msIndexedDB,
-        IDBDatabase = window.IDBDatabase || window.webkitIDBDatabase,
-        IDBTransaction = window.IDBTransaction || window.webkitIDBTransaction,
-        IDBKeyRange = window.IDBKeyRange || window.webkitIDBKeyRange,
+    var indexedDB = window.msIndexedDB,
+        IDBDatabase = window.IDBDatabase,
+        IDBTransaction = window.IDBTransaction,
+        IDBKeyRange = window.IDBKeyRange,
         transactionModes = {
-            readonly: IDBTransaction.READ_ONLY || 'readonly',
-            readwrite: IDBTransaction.READ_WRITE || 'readwrite'
+            readonly: 'readonly',
+            readwrite: 'readwrite'
         };
-        
+
+    var Signal = WinJS.Class.mix(WinJS.Class.define(function () {
+        var that = this;
+        // This uses the "that" pattern 'c ause it's called from a constructor, and
+        // I don't want to mess with anything weird to upset the promise gods.
+        this._wrappedPromise = new WinJS.Promise(function (c, e, p) {
+            that._complete = c;
+            that._error = e;
+            that._progress = p;
+        }, this._handleCancelled.bind(this));
+    },
+        {
+            _wrappedPromise: null,
+            _complete: null,
+            _error: null,
+            _progress: null,
+            _handleCancelled: function _handleCancelled(e) {
+                this.dispatchEvent("cancelled", { signal: this });
+            },
+            promise: {
+                get: function () {
+                    return this._wrappedPromise;
+                }
+            },
+            complete: function signal_complete(value) {
+                this._complete(value);
+            },
+            error: function signal_error(errorInfo) {
+                this._error(errorInfo);
+            },
+            progress: function signal_progress(progressInfo) {
+                this._progress(progressInfo);
+            },
+        }), WinJS.Utilities.eventMixin);
+
     var hasOwn = Object.prototype.hasOwnProperty;
 
-    var oldApi = !!IDBDatabase.prototype.setVersion;
+    if (!indexedDB) {
+        throw 'IndexedDB required';
+    }
 
-	if ( !indexedDB ) {
-		throw 'IndexedDB required';
-	}
-
-    var CallbackList = function () {
-        var state,
-            list = [];
-
-        var exec = function ( context , args ) {
-            if ( list ) {
-                args = args || [];
-                state = state || [ context , args ];
-
-                for ( var i = 0 , il = list.length ; i < il ; i++ ) {
-                    list[ i ].apply( state[ 0 ] , state[ 1 ] );
-                }
-
-                list = [];
-            }
-        };
-
-        this.add = function () {
-            for ( var i = 0 , il = arguments.length ; i < il ; i ++ ) {
-                list.push( arguments[ i ] );
-            }
-
-            if ( state ) {
-                exec();
-            }
-
-            return this;
-        };
-
-        this.execute = function () {
-            exec( this , arguments );
-            return this;
-        };
-    };
-
-    var Promise = function () {
-        var doneList = new CallbackList(),
-            failedList = new CallbackList(),
-            progressList = new CallbackList(),
-            state = 'progress'
-            ;
-
-        this.done = doneList.add;
-        this.fail = failedList.add;
-        this.progress = progressList.add;
-        this.resolve = doneList.execute;
-        this.reject = failedList.execute;
-        this.notify = progressList.execute;
-
-        this.then = function ( doneHandler , failedHandler , progressHandler ) {
-            return this.done( doneHandler ).fail( failedHandler ).progress( progressHandler );
-        };
-
-        this.done( function () { 
-            state = 'resolved';
-        }).fail( function () {
-            state = 'rejected';
-        });
-    };
-
-    var Server = function ( db , name ) {
+    var Server = function Server_Constructor(db, name) {
         var that = this,
             closed = false;
-        this.add = function( table , records ) {
-            if ( closed ) {
+        this.add = function Server_Add(table, records) {
+            if (closed) {
                 throw 'Database has been closed';
             }
-            var transaction = db.transaction( table , transactionModes.readwrite );
-            var store = transaction.objectStore( table );
-            
-            if ( records.constructor !== Array ) {
-                records = [ records ];
+            var transaction = db.transaction(table, transactionModes.readwrite);
+            var store = transaction.objectStore(table);
+
+            if (records.constructor !== Array) {
+                records = [records];
             }
 
-            var promise = new Promise();
-            
-            records.forEach( function ( record ) {
-                var req = store.add( record );
-                req.onsuccess = function ( e ) {
-                    var target = e.target;
-                    record[ target.source.keyPath ] = target.result;
+            var signal = new Signal();
 
-                    promise.notify();
+            records.forEach(function Server_Add_RecordsForEach(record) {
+                var req = store.add(record);
+                req.onsuccess = function Server_Add_RecordsForEach_Success(e) {
+                    var target = e.target;
+                    record[target.source.keyPath] = target.result;
+
+                    signal.progress();
                 };
             });
-            
-            transaction.oncomplete = function () {
-                promise.resolve( records ,that );
+
+            transaction.oncomplete = function Server_Add_Complete() {
+                signal.complete(records, that);
             };
 
-            transaction.onerror = function ( e ) {
-                promise.reject( records , e );
+            transaction.onerror = function Server_Add_Error(e) {
+                signal.error(records, e);
             };
 
-            transaction.onabort = function ( e ) {
-                promise.reject( records , e );
+            transaction.onabort = function Server_Add_Abort(e) {
+                signal.error(records, e);
             };
-            return promise;
+            return signal.promise;
         };
-        
-        this.remove = function ( table , key ) {
-            if ( closed ) {
+
+        this.remove = function Server_Remove(table, key) {
+            if (closed) {
                 throw 'Database has been closed';
             }
-            var transaction = db.transaction( table , transactionModes.readwrite );
-            var store = transaction.objectStore( table );
-            
-            store.delete( key );
+            var transaction = db.transaction(table, transactionModes.readwrite);
+            var store = transaction.objectStore(table);
+
+            store.delete (key);
         };
-        
-        this.query = function ( table ) {
-            if ( closed ) {
+
+        this.query = function Server_Query(table) {
+            if (closed) {
                 throw 'Database has been closed';
             }
-            return new Query( table , db );
+            return new Query(table, db);
         };
-        
-        this.close = function ( ) {
-            if ( closed ) {
+
+        this.close = function Server_Close() {
+            if (closed) {
                 throw 'Database has been closed';
             }
             db.close();
             closed = true;
-            delete dbCache[ name ];
+            delete dbCache[name];
         };
 
-        this.get = function ( table , id ) {
-            var transaction = db.transaction( table ),
-                store = transaction.objectStore( table ),
-                promise = new Promise();
+        this.get = function Server_Get(table, id) {
+            var transaction = db.transaction(table),
+                store = transaction.objectStore(table),
+                signal = new Signal();
 
-            var req = store.get( id );
-            req.onsuccess = function ( e ) {
-                promise.resolve( e.target.result );
+            var req = store.get(id);
+            req.onsuccess = function Server_Get_Success(e) {
+                signal.complete(e.target.result);
             };
-            req.onerror = function ( e ) {
-                promise.reject( e );
+            req.onerror = function Server_Get_Error(e) {
+                signal.error(e);
             };
-            return promise;
+            return signal.promise;
         };
 
-        this.index = function ( table , index ) {
-            return new IndexQuery( table , index , db );
+        this.index = function Server_Index(table, index) {
+            return new IndexQuery(table, index, db);
         };
 
-        for ( var i = 0 , il = db.objectStoreNames.length ; i < il ; i++ ) {
-            (function ( storeName ) {
-                that[ storeName ] = { };
-                for ( var i in that ) {
-                    if ( !hasOwn.call( that , i ) || i === 'close' ) {
+        for (var i = 0, il = db.objectStoreNames.length ; i < il ; i++) {
+            (function Server_Constructor_MapStoreNames(storeName) {
+                that[storeName] = {};
+                for (var i in that) {
+                    if (!hasOwn.call(that, i) || i === 'close') {
                         continue;
                     }
-                    that[ storeName ][ i ] = (function ( i ) {
+                    that[storeName][i] = (function Server_Constructor_StoreNameGetter(i) {
                         return function () {
-                            var args = [ storeName ].concat( [].slice.call( arguments , 0 ) );
-                            return that[ i ].apply( that , args );
+                            var args = [storeName].concat([].slice.call(arguments, 0));
+                            return that[i].apply(that, args);
                         };
-                    })( i );
+                    })(i);
                 }
-            })( db.objectStoreNames[ i ] );
+            })(db.objectStoreNames[i]);
         }
     };
 
-    var IndexQuery = function ( table , indexName , db ) {
-        this.only = function ( val ) {
-            var transaction = db.transaction( table ),
-                store = transaction.objectStore( table ),
-                index = store.index( indexName ),
-                singleKeyRange = IDBKeyRange.only( val ),
+    var IndexQuery = function IndexQuery_Constructor(table, indexName, db) {
+        this.only = function IndexQuery_Only(val) {
+            var transaction = db.transaction(table),
+                store = transaction.objectStore(table),
+                index = store.index(indexName),
+                singleKeyRange = IDBKeyRange.only(val),
                 results = [],
-                promise = new Promise();
+                signal = new Signal();
 
-            index.openCursor( singleKeyRange ).onsuccess = function ( e ) {
+            index.openCursor(singleKeyRange).onsuccess = function IndexQuery_Only_OpenCursor(e) {
                 var cursor = e.target.result;
 
-                if ( cursor ) {
-                    results.push( cursor.value );
+                if (cursor) {
+                    results.push(cursor.value);
                     cursor.continue();
                 }
             };
 
-            transaction.oncomplete = function () {
-                promise.resolve( results );
+            transaction.oncomplete = function IndexQuery_Only_Complete() {
+                signal.complete(results);
             };
-            transaction.onerror = function ( e ) {
-                promise.reject( e );
+            transaction.onerror = function IndexQuery_Only_Error(e) {
+                signal.error(e);
             };
-            transaction.onabort = function ( e ) {
-                promise.reject( e );
+            transaction.onabort = function IndexQuery_Only_Abort(e) {
+                signal.error(e);
             };
-            return promise;
+            return signal.promise;
         };
     };
-    
-    var Query = function ( table , db ) {
+
+    var Query = function Query_Constructor(table, db) {
         var that = this,
             filters = [];
-        
-        this.filter = function ( field , value ) {
-            filters.push( {
+
+        this.filter = function Query_Filter(field, value) {
+            filters.push({
                 field: field,
                 value: value
             });
             return that;
         };
-        
-        this.execute = function () {
-            var records = [],
-                transaction = db.transaction( table ),
-                store = transaction.objectStore( table );
-            
-            var req = store.openCursor();
-            var promise = new Promise();
 
-            req.onsuccess = function ( e ) {
+        this.execute = function Query_Execute() {
+            var records = [],
+                transaction = db.transaction(table),
+                store = transaction.objectStore(table);
+
+            var req = store.openCursor();
+            var signal = new Signal();
+
+            req.onsuccess = function Query_Execute_Success(e) {
                 var value, f,
                     inc = true,
                     cursor = e.target.result;
-                
-                if ( cursor ) {
+
+                if (cursor) {
                     value = cursor.value;
-                    for ( var i = 0 , il = filters.length ; i < il ; i++ ) {
-                        f = filters[ i ];
+                    for (var i = 0, il = filters.length ; i < il ; i++) {
+                        f = filters[i];
                         if (typeof f.field === 'function') {
                             inc = f.field(value);
                         } else if (value[f.field] !== f.value) {
                             inc = false;
                         }
                     }
-                    
-                    if ( inc ) {
-                        records.push( value );
+
+                    if (inc) {
+                        records.push(value);
                     } else {
-                        if ( ~records.indexOf( value ) ) {
-                            records = records.slice( 0 , records.indexOf( value ) ).concat( records.indexOf( value ) );
+                        if (~records.indexOf(value)) {
+                            records = records.slice(0, records.indexOf(value)).concat(records.indexOf(value));
                         }
                     }
-                    
+                    // TODO: report progress?
                     cursor.continue();
                 } else {
-                    promise.resolve( records );
+                    signal.complete(records);
                 }
             };
 
-            req.onerror = function ( e ) {
-                promise.reject( e );
+            req.onerror = function Query_Execute_Error(e) {
+                signal.error(e);
             };
-            transaction.onabort = function ( e ) {
-                promise.reject( e );
+            transaction.onabort = function Query_Execute_Abort(e) {
+                signal.error(e);
             };
 
-            return promise;
+            return signal.promise;
         };
     };
-    
-    var createSchema = function ( e , schema , db ) {
-        if ( typeof schema === 'function' ) {
+
+    var createSchema = function createSchema(e, schema, db) {
+        if (typeof schema === 'function') {
             schema = schema();
         }
-        
-        for ( var tableName in schema ) {
-            var table = schema[ tableName ];
-            if ( !hasOwn.call( schema , tableName ) ) {
+
+        for (var tableName in schema) {
+            var table = schema[tableName];
+            if (!hasOwn.call(schema, tableName)) {
                 continue;
             }
-            
-            var store = db.createObjectStore( tableName , table.key );
 
-            for ( var indexKey in table.indexes ) {
-                var index = table.indexes[ indexKey ];
-                store.createIndex( indexKey , index.key || indexKey , index.options || { unique: false } );
+            var store = db.createObjectStore(tableName, table.key);
+
+            for (var indexKey in table.indexes) {
+                var index = table.indexes[indexKey];
+                store.createIndex(indexKey, index.key || indexKey, index.options || { unique: false });
             }
         }
-    };
-    
-    var open = function ( e , server , version , schema ) {
-        var db = e.target.result;
-        var s = new Server( db , server );
-        var upgrade;
-
-        var promise = new Promise();
-        
-        if ( oldApi && window.parseInt( db.version ) !== version ) {
-            upgrade = db.setVersion( version );
-            
-            upgrade.onsuccess = function ( e ) {
-                createSchema( e , schema , db );
-                                
-                promise.resolve( s );
-            };
-            upgrade.onerror = function ( e ) {
-                promise.reject( e );
-            };
-            
-            upgrade.onblocked = function () {
-                promise.reject( e );
-            };
-        } else {
-            promise.resolve( s );
-        }
-        dbCache[ server ] = db;
-
-        return promise;
     };
 
     var dbCache = {};
 
     window.db = {
-        open: function ( options ) {
+        open: function open(options) {
+            var db = dbCache[options.server];
             var request;
-
-            var promise = new Promise();
-
-            if ( dbCache[ options.server ] ) {
-                open( {
-                    target: {
-                        result: dbCache[ options.server ]
-                    }
-                } , options.server , options.version , options.schema )
-                .done(promise.resolve)
-                .fail(promise.reject)
-                .progress(promise.notify);
+            var complete;
+            var signal;
+            if (db) {
+                complete = WinJS.Promise.as(new Server(db, options.server));
             } else {
-                request = indexedDB.open( options.server , options.version );
-                            
-                request.onsuccess = function ( e ) {
-                    open( e , options.server , options.version , options.schema )
-                        .done(promise.resolve)
-                        .fail(promise.reject)
-                        .progress(promise.notify);
+                request = indexedDB.open(options.server, options.version);
+                signal = new Signal();
+                complete = signal.promise;
+                request.onsuccess = function open_success(e) {
+                    var server = new Server(e.target.result, options.server);
+                    dbCache[options.server] = e.target.result;
+                    signal.complete(server);
                 };
-            
-                request.onupgradeneeded = function ( e ) {
-                    createSchema( e , options.schema , e.target.result );
+
+                request.onerror = function open_error(e) {
+                    signal.error(e);
                 };
-                request.onerror = function ( e ) {
-                    promise.reject( e );
+
+                request.onupgradeneeded = function open_upgrade(e) {
+                    createSchema(e, options.schema, e.target.result);
                 };
             }
 
-            return promise;
-        }
+            return complete;
+        },
     };
-})( window );
+})(window);
