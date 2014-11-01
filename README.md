@@ -15,7 +15,8 @@ Once you have the script included you can then open connections to each differen
 	var server;
 	db.open({
          server: 'my-app',
-         version: 1, {
+         version: 1, 
+         schema: {
              people: {
                  key: { keyPath: 'id' , autoIncrement: true }
              }
